@@ -2,10 +2,19 @@ const logEl = document.getElementById("log");
 const statusEl = document.getElementById("status");
 const connectBtn = document.getElementById("connectBtn");
 const sendBtn = document.getElementById("sendBtn");
+const startCameraBtn = document.getElementById("startCameraBtn");
+const stopCameraBtn = document.getElementById("stopCameraBtn");
+const cameraPreview = document.getElementById("cameraPreview");
 
 let transport;
 let bidiStream;
 let writer;
+
+// Camera / encoder state
+let cameraStream = null;
+let videoEncoder = null;
+let cameraUniWriter = null;
+let encoderOutputCount = 0;
 
 function log(msg) {
   console.log(msg);
@@ -210,6 +219,155 @@ async function handleVideoStream(stream) {
 }
 
 // ---------------------------------------------------------------------------
+// Camera capture, VideoEncoder, and browser-initiated unidirectional stream
+//
+// Wire format per frame (matches server writeFrame / Sub-step A header):
+//   [4 B BE] frame_number
+//   [8 B BE] timestamp_microseconds  (from EncodedVideoChunk.timestamp)
+//   [1 B   ] frame_type  (0x01 keyframe, 0x00 delta)
+//   [4 B BE] payload_length
+//   [N B   ] Annex B encoded data
+// ---------------------------------------------------------------------------
+async function sendEncodedChunk(chunk, frameNum) {
+  if (!cameraUniWriter) return;
+
+  const payload = new Uint8Array(chunk.byteLength);
+  chunk.copyTo(payload);
+
+  const header = new Uint8Array(17);
+  const view = new DataView(header.buffer);
+  view.setUint32(0, frameNum, false);
+  view.setBigUint64(4, BigInt(chunk.timestamp), false);
+  header[12] = chunk.type === "key" ? 0x01 : 0x00;
+  view.setUint32(13, payload.length, false);
+
+  const packet = new Uint8Array(17 + payload.length);
+  packet.set(header, 0);
+  packet.set(payload, 17);
+
+  await cameraUniWriter.write(packet);
+
+  if (frameNum === 0) {
+    log("First camera frame encoded and sent");
+  }
+  if (chunk.type === "key") {
+    log(`Keyframe sent (frame=${frameNum}, ${payload.length} B)`);
+  }
+}
+
+startCameraBtn.onclick = async () => {
+  startCameraBtn.disabled = true;
+
+  try {
+    log("Requesting camera access...");
+    cameraStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480 },
+      audio: false,
+    });
+    cameraPreview.srcObject = cameraStream;
+    log("Camera started");
+
+    // Open a browser-initiated unidirectional stream on the existing transport.
+    const uniStream = await transport.createUnidirectionalStream();
+    cameraUniWriter = uniStream.getWriter();
+    log("Camera upload stream opened");
+
+    // Initialise encoder.
+    encoderOutputCount = 0;
+    videoEncoder = new VideoEncoder({
+      output(chunk, _metadata) {
+        const frameNum = encoderOutputCount++;
+        sendEncodedChunk(chunk, frameNum).catch(e => log("Send chunk error: " + e));
+      },
+      error(e) {
+        log("VideoEncoder error: " + e);
+      },
+    });
+
+    videoEncoder.configure({
+      codec: "avc1.42E01E",      // H.264 Baseline
+      width: 640,
+      height: 480,
+      bitrate: 1_000_000,        // 1 Mbps
+      framerate: 30,
+      latencyMode: "realtime",
+      avc: { format: "annexb" }, // raw Annex B NAL units
+    });
+    log("VideoEncoder initialized");
+
+    // Pull VideoFrame objects from the camera track via MediaStreamTrackProcessor.
+    const track = cameraStream.getVideoTracks()[0];
+    const processor = new MediaStreamTrackProcessor({ track });
+    const frameReader = processor.readable.getReader();
+
+    stopCameraBtn.disabled = false;
+
+    // Feed frames to the encoder until the track ends or stopCamera() is called.
+    let inputFrameCount = 0;
+    (async () => {
+      try {
+        while (true) {
+          const { value: frame, done } = await frameReader.read();
+          if (done) break;
+
+          const isKeyFrame = inputFrameCount % 60 === 0;
+          if (isKeyFrame) {
+            log(`Keyframe requested at input frame ${inputFrameCount}`);
+          }
+
+          videoEncoder.encode(frame, { keyFrame: isKeyFrame });
+          frame.close(); // free GPU memory immediately
+          inputFrameCount++;
+        }
+      } catch (e) {
+        if (e.name !== "AbortError") {
+          log("Frame read error: " + e);
+        }
+      }
+    })();
+
+  } catch (err) {
+    log("Camera error: " + err);
+    startCameraBtn.disabled = false;
+  }
+};
+
+stopCameraBtn.onclick = async () => {
+  stopCameraBtn.disabled = true;
+
+  // Stop the media track (causes the processor reader to finish).
+  if (cameraStream) {
+    cameraStream.getTracks().forEach(t => t.stop());
+    cameraStream = null;
+    cameraPreview.srcObject = null;
+  }
+
+  // Flush pending encoder output before closing.
+  if (videoEncoder && videoEncoder.state !== "closed") {
+    try {
+      await videoEncoder.flush();
+    } catch (e) {
+      log("Encoder flush error: " + e);
+    }
+    videoEncoder.close();
+    videoEncoder = null;
+  }
+
+  // Close the stream to signal EOF to the server.
+  if (cameraUniWriter) {
+    try {
+      await cameraUniWriter.close();
+    } catch (e) {
+      log("Stream close error: " + e);
+    }
+    cameraUniWriter = null;
+  }
+
+  log(`Camera stopped. Encoded ${encoderOutputCount} frames total.`);
+  startCameraBtn.disabled = false;
+};
+
+// ---------------------------------------------------------------------------
 // Connect button — establishes the WebTransport session, starts the video
 // listener, and opens the existing bidirectional echo stream.
 // ---------------------------------------------------------------------------
@@ -230,6 +388,10 @@ connectBtn.onclick = async () => {
     await transport.ready;
     statusEl.textContent = "Connected!";
     log("Connected!");
+
+    // Camera only needs the transport — enable it as soon as we're connected.
+    startCameraBtn.disabled = false;
+
     log("Listening for incoming video stream...");
 
     // Start listening for the server-initiated unidirectional video stream.

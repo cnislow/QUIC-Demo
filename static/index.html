@@ -16,8 +16,13 @@
 
   <button id="connectBtn">Connect</button>
   <button id="sendBtn" disabled>Send Message</button>
+  <button id="startCameraBtn" disabled>Start Camera</button>
+  <button id="stopCameraBtn" disabled>Stop Camera</button>
 
   <canvas id="videoCanvas" width="640" height="480"></canvas>
+
+  <video id="cameraPreview" width="320" height="240" autoplay muted playsinline
+         style="display:block; margin-top:12px; border:1px solid #ccc; background:#111;"></video>
 
   <pre id="log"></pre>
 
