@@ -1,12 +1,17 @@
 # quic-demo
 
-A WebTransport demo over HTTP/3 (QUIC). A browser connects to a Go server which streams a pre-encoded H.264 file over a unidirectional stream. The browser decodes it with WebCodecs and renders it to a canvas. A bidirectional echo stream is also available for testing.
+A WebTransport demo over HTTP/3 (QUIC) with three concurrent streams on a single connection:
+
+- **Server → Browser:** Go server streams a pre-encoded H.264 file over a server-initiated unidirectional stream. The browser decodes it with WebCodecs and renders it to a canvas.
+- **Browser → Server:** The browser captures live camera video, encodes it with WebCodecs (H.264 Annex B), and ships the encoded frames over a browser-initiated unidirectional stream. The server accepts, logs each frame header, and discards the payload.
+- **Bidirectional echo:** A bidi stream for testing round-trip messaging.
 
 ```
 Browser (localhost:8443)
   └── WebTransport over QUIC
         └── Go server (127.0.0.1:4433)
-              ├── → unidirectional stream: H.264 video frames (30 fps)
+              ├── → unidirectional stream (server-initiated): H.264 video frames (30 fps)
+              ├── ← unidirectional stream (browser-initiated): encoded camera frames
               └── ↔ bidirectional stream: echo: Hello QUIC!
 ```
 
@@ -110,9 +115,31 @@ Serving static files on https://localhost:8443
 
 1. Open Chrome and navigate to **`https://localhost:8443`**
 2. If prompted, accept the certificate warning for the static server (only needed once after a fresh mkcert install)
-3. Click **Connect** — status should change to "Connected!" and the server will immediately begin streaming video
-4. The canvas should start rendering the decoded H.264 frames within a second or two
+3. Click **Connect** — status changes to "Connected!" and the server immediately begins streaming video
+4. The canvas starts rendering decoded H.264 frames within a second or two
 5. Click **Send Message** to test the echo stream — you should see `Received: echo: Hello QUIC!` in the log
+
+### Camera upload (browser → server)
+
+6. Click **Start Camera** — the browser prompts for camera permission, then:
+   - The small preview element shows the live camera feed
+   - A browser-initiated unidirectional stream opens on the existing WebTransport connection
+   - A `VideoEncoder` (H.264 Baseline, 640×480, 1 Mbps, Annex B) encodes incoming frames
+   - Each encoded chunk is framed with a 17-byte binary header and written to the stream
+   - The server logs each received frame: number, type (keyframe/delta), timestamp, and payload size
+7. Click **Stop Camera** to stop the track, flush the encoder, and close the stream. The server logs a summary of total frames and bytes received.
+
+The camera upload uses the same binary framing format as the server-to-browser video stream:
+
+```
+[4 B BE] frame_number
+[8 B BE] timestamp_microseconds
+[1 B   ] frame_type  (0x01 = keyframe, 0x00 = delta)
+[4 B BE] payload_length
+[N B   ] H.264 Annex B payload
+```
+
+> **Note:** The WebTransport session stays open after `test.264` finishes playing. Only the server-initiated unidirectional stream closes; the camera upload stream and echo stream remain fully functional.
 
 ## Project structure
 
@@ -124,8 +151,8 @@ quic-demo/
 ├── static-server/
 │   └── main.go          # HTTPS static file server (:8443)
 ├── static/
-│   ├── index.html       # Demo UI (canvas + echo controls)
-│   └── client.js        # WebTransport client: video decode + echo stream
+│   ├── index.html       # Demo UI (canvas, echo controls, camera controls)
+│   └── client.js        # WebTransport client: video decode + camera encode + echo stream
 ├── gen-cert.sh          # Generates wt-cert.pem and patches client.js hash
 ├── cert.pem / key.pem   # mkcert cert for the static server (git-ignored)
 ├── wt-cert.pem / wt-key.pem  # Short-lived ECDSA cert for QUIC (git-ignored)
