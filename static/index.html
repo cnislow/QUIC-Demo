@@ -24,14 +24,19 @@
       <p style="margin:0 0 4px; font-weight:bold;">File Playback</p>
       <canvas id="videoCanvas" width="640" height="480"></canvas>
     </div>
+  </div>
+
+  <div style="display:flex; gap:24px; flex-wrap:wrap; margin-top:24px;">
+    <div>
+      <p style="margin:0 0 4px; font-weight:bold;">Camera Capture</p>
+      <video id="cameraPreview" width="640" height="480" autoplay muted playsinline
+             style="display:block; border:1px solid #ccc; background:#111;"></video>
+    </div>
     <div>
       <p style="margin:0 0 4px; font-weight:bold;">QUIC Relayed Video</p>
       <canvas id="relayCanvas" width="640" height="480"></canvas>
     </div>
   </div>
-
-  <video id="cameraPreview" width="320" height="240" autoplay muted playsinline
-         style="display:block; margin-top:12px; border:1px solid #ccc; background:#111;"></video>
 
   <pre id="log"></pre>
 
