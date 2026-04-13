@@ -104,7 +104,7 @@ func handleSession(sess *wt.Session) {
 }
 
 // acceptCameraStreams loops accepting browser-initiated unidirectional streams
-// and spawns a goroutine to drain each one.
+// and spawns a goroutine to relay each one back to the browser.
 func acceptCameraStreams(sess *wt.Session) {
 	ctx := context.Background()
 	for {
@@ -113,13 +113,14 @@ func acceptCameraStreams(sess *wt.Session) {
 			log.Println("AcceptUniStream error:", err)
 			return
 		}
-		log.Println("Camera: browser-initiated unidirectional stream accepted")
-		go receiveCameraStream(stream)
+		log.Println("Relay: browser-initiated unidirectional stream accepted")
+		go relayCameraStream(sess, stream)
 	}
 }
 
-// receiveCameraStream reads the binary-framed camera data sent by the browser,
-// logs each frame header, and discards the payload.
+// relayCameraStream reads binary-framed camera data from the browser-initiated
+// inbound stream and pipes each complete frame (header + payload, unchanged) to
+// a new server-initiated unidirectional relay stream prefixed with tag 0x02.
 //
 // Frame wire format (same as writeFrame / Sub-step A):
 //
@@ -127,46 +128,66 @@ func acceptCameraStreams(sess *wt.Session) {
 //	[8 B BE] timestamp_microseconds
 //	[1 B   ] frame_type  (0x01 = keyframe, 0x00 = delta)
 //	[4 B BE] payload_length
-//	[N B   ] payload (Annex B H.264 data — discarded)
-func receiveCameraStream(stream *wt.ReceiveStream) {
+//	[N B   ] payload (Annex B H.264 data)
+func relayCameraStream(sess *wt.Session, inbound *wt.ReceiveStream) {
+	ctx := context.Background()
+
+	outbound, err := sess.OpenUniStreamSync(ctx)
+	if err != nil {
+		log.Println("Relay: OpenUniStreamSync error:", err)
+		return
+	}
+	defer outbound.Close()
+
+	log.Println("Relay: outbound stream opened, writing stream-type tag 0x02")
+
+	if _, err := outbound.Write([]byte{0x02}); err != nil {
+		log.Println("Relay: write stream-type tag error:", err)
+		return
+	}
+
 	const hdrSize = 17
 	var hdr [hdrSize]byte
 	var totalFrames int
-	var totalBytes int64
 
 	for {
-		if _, err := io.ReadFull(stream, hdr[:]); err != nil {
+		if _, err := io.ReadFull(inbound, hdr[:]); err != nil {
 			if err != io.EOF && err != io.ErrUnexpectedEOF {
-				log.Println("Camera: header read error:", err)
+				log.Println("Relay: header read error:", err)
 			}
 			break
 		}
 
 		frameNum := binary.BigEndian.Uint32(hdr[0:4])
-		timestamp := binary.BigEndian.Uint64(hdr[4:12])
 		frameType := hdr[12]
 		payloadLen := binary.BigEndian.Uint32(hdr[13:17])
 
+		payload := make([]byte, payloadLen)
+		if _, err := io.ReadFull(inbound, payload); err != nil {
+			if err != io.EOF && err != io.ErrUnexpectedEOF {
+				log.Println("Relay: payload read error:", err)
+			}
+			break
+		}
+
+		if _, err := outbound.Write(hdr[:]); err != nil {
+			log.Println("Relay: write header error:", err)
+			break
+		}
+		if _, err := outbound.Write(payload); err != nil {
+			log.Println("Relay: write payload error:", err)
+			break
+		}
+
+		totalFrames++
 		frameTypeName := "delta"
 		if frameType == 0x01 {
 			frameTypeName = "keyframe"
 		}
-		log.Printf("Camera: frame=%d type=%s timestamp=%dµs payload=%dB",
-			frameNum, frameTypeName, timestamp, payloadLen)
-
-		n, err := io.CopyN(io.Discard, stream, int64(payloadLen))
-		totalFrames++
-		totalBytes += hdrSize + n
-
-		if err != nil {
-			if err != io.EOF {
-				log.Println("Camera: payload discard error:", err)
-			}
-			break
-		}
+		log.Printf("Relay: frame=%d type=%s size=%dB", frameNum, frameTypeName, hdrSize+int(payloadLen))
 	}
 
-	log.Printf("Camera: stream closed — %d frames, %d bytes total", totalFrames, totalBytes)
+	log.Printf("Relay: stream closed — %d frames relayed", totalFrames)
 }
 
 // streamVideo opens a unidirectional send stream and pushes a pre-encoded
@@ -181,7 +202,12 @@ func streamVideo(sess *wt.Session) {
 	}
 	defer stream.Close()
 
-	log.Println("Video: unidirectional stream opened")
+	log.Println("Video: unidirectional stream opened, writing stream-type tag 0x01")
+
+	if _, err := stream.Write([]byte{0x01}); err != nil {
+		log.Println("Video: write stream-type tag error:", err)
+		return
+	}
 
 	data, err := os.ReadFile("test.264")
 	if err != nil {

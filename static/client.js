@@ -97,7 +97,9 @@ function initVideoDecoder(sps, pps) {
 
 // ---------------------------------------------------------------------------
 // Unidirectional stream listener — called once after transport.ready.
-// The server opens exactly one such stream and streams video on it.
+// Reads the 1-byte stream-type tag from each incoming stream and dispatches:
+//   0x01 → file playback (handleVideoStream)
+//   0x02 → live relay    (handleRelayStream)
 // ---------------------------------------------------------------------------
 function listenForVideoStreams(transport) {
   const reader = transport.incomingUnidirectionalStreams.getReader();
@@ -108,12 +110,42 @@ function listenForVideoStreams(transport) {
         const { value: stream, done } = await reader.read();
         if (done) break;
         log("Incoming unidirectional stream opened");
-        handleVideoStream(stream).catch(e => log("Video stream error: " + e));
+        dispatchStream(stream).catch(e => log("Stream dispatch error: " + e));
       }
     } catch (e) {
       log("incomingUnidirectionalStreams error: " + e);
     }
   })();
+}
+
+// Reads the first byte of a stream to determine its type, then hands off the
+// stream reader and any leftover bytes to the appropriate handler.
+async function dispatchStream(stream) {
+  const reader = stream.getReader();
+
+  // Accumulate until we have at least 1 byte (first chunk may be empty).
+  let buffer = new Uint8Array(0);
+  while (buffer.length < 1) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    const next = new Uint8Array(buffer.length + value.length);
+    next.set(buffer, 0);
+    next.set(value, buffer.length);
+    buffer = next;
+  }
+
+  const streamType = buffer[0];
+  const remainder = buffer.slice(1);
+
+  if (streamType === 0x01) {
+    log("Stream type: 0x01 — file playback");
+    handleVideoStream(reader, remainder).catch(e => log("Video stream error: " + e));
+  } else if (streamType === 0x02) {
+    log("Stream type: 0x02 — QUIC relay");
+    handleRelayStream(reader, remainder).catch(e => log("Relay stream error: " + e));
+  } else {
+    log("Unknown stream type: 0x" + streamType.toString(16));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -133,11 +165,10 @@ function listenForVideoStreams(transport) {
 // Payload data is rewrapped in AVCC format (4-byte big-endian length prefix)
 // before being passed to VideoDecoder.decode(), which is what avc1.* expects.
 // ---------------------------------------------------------------------------
-async function handleVideoStream(stream) {
-  const reader = stream.getReader();
-
+async function handleVideoStream(reader, initialData) {
   // Accumulation buffer — stream chunks may not align with frame boundaries.
-  let buffer = new Uint8Array(0);
+  // Seed with any bytes already consumed while reading the stream-type tag.
+  let buffer = initialData || new Uint8Array(0);
 
   let spsData = null;
   let ppsData = null;
@@ -208,6 +239,99 @@ async function handleVideoStream(stream) {
         } catch (e) {
           log(`Decode error (frame ${frameNum}): ${e}`);
         }
+      }
+    }
+  }
+
+  if (decoder) {
+    await decoder.flush();
+    decoder.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Relay stream handler — receives frames relayed by the server from the
+// browser's own camera upload and renders them to the relay canvas.
+//
+// The relay payload is raw Annex B H.264 data (same format the camera encoder
+// outputs). The VideoDecoder is configured without a description so it
+// self-initializes from the in-band SPS/PPS NAL units inside keyframes.
+// ---------------------------------------------------------------------------
+function initRelayDecoder() {
+  const canvas = document.getElementById("relayCanvas");
+  const ctx = canvas.getContext("2d");
+
+  const decoder = new VideoDecoder({
+    output(frame) {
+      ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+      frame.close();
+    },
+    error(e) {
+      console.error("Relay VideoDecoder error:", e);
+    },
+  });
+
+  decoder.configure({
+    codec: "avc1.42E01E",
+    width: 640,
+    height: 480,
+    optimizeForLatency: true,
+  });
+
+  return decoder;
+}
+
+async function handleRelayStream(reader, initialData) {
+  console.log("Relay stream opened — initializing relay decoder");
+  log("Relay stream opened");
+
+  let buffer = initialData || new Uint8Array(0);
+  const decoder = initRelayDecoder();
+  const HEADER_SIZE = 17;
+  let firstFrame = true;
+
+  function appendBuffer(chunk) {
+    const next = new Uint8Array(buffer.length + chunk.length);
+    next.set(buffer, 0);
+    next.set(chunk, buffer.length);
+    buffer = next;
+  }
+
+  while (true) {
+    const { value: chunk, done } = await reader.read();
+    if (done) {
+      log("Relay stream closed by server");
+      break;
+    }
+    appendBuffer(chunk);
+
+    while (buffer.length >= HEADER_SIZE) {
+      const view = new DataView(buffer.buffer);
+      const frameNum   = view.getUint32(0, false);
+      const tsHi       = view.getUint32(4, false);
+      const tsLo       = view.getUint32(8, false);
+      const timestamp  = tsHi * 4294967296 + tsLo;
+      const frameType  = buffer[12];
+      const payloadLen = view.getUint32(13, false);
+
+      if (buffer.length < HEADER_SIZE + payloadLen) break;
+
+      const payload = buffer.slice(HEADER_SIZE, HEADER_SIZE + payloadLen);
+      buffer = buffer.slice(HEADER_SIZE + payloadLen);
+
+      if (firstFrame) {
+        log(`Relay: first frame received (frame=${frameNum}, type=${frameType === 0x01 ? "key" : "delta"})`);
+        firstFrame = false;
+      }
+
+      try {
+        decoder.decode(new EncodedVideoChunk({
+          type: frameType === 0x01 ? "key" : "delta",
+          timestamp,
+          data: payload,
+        }));
+      } catch (e) {
+        console.error(`Relay decode error (frame ${frameNum}):`, e);
       }
     }
   }
