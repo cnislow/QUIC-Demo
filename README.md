@@ -1,12 +1,13 @@
 # quic-demo
 
-A minimal WebTransport echo demo over HTTP/3 (QUIC). A browser connects to a Go server, opens a bidirectional stream, sends a message, and receives it echoed back.
+A WebTransport demo over HTTP/3 (QUIC). A browser connects to a Go server which streams a pre-encoded H.264 file over a unidirectional stream. The browser decodes it with WebCodecs and renders it to a canvas. A bidirectional echo stream is also available for testing.
 
 ```
 Browser (localhost:8443)
   └── WebTransport over QUIC
         └── Go server (127.0.0.1:4433)
-              └── echo: Hello QUIC!
+              ├── → unidirectional stream: H.264 video frames (30 fps)
+              └── ↔ bidirectional stream: echo: Hello QUIC!
 ```
 
 ## Prerequisites
@@ -14,7 +15,8 @@ Browser (localhost:8443)
 - **Go 1.23+**
 - **OpenSSL** (for cert generation — ships with macOS via Homebrew or the system)
 - **mkcert** (for the static server's HTTPS cert)
-- **Chrome** (WebTransport requires a Chromium-based browser)
+- **ffmpeg** (for generating the test video — `brew install ffmpeg`)
+- **Chrome** (WebTransport and WebCodecs require a Chromium-based browser)
 
 Install mkcert if you don't have it:
 
@@ -33,7 +35,26 @@ cd quic-demo
 go mod download
 ```
 
-### 2. Generate the static server cert (mkcert)
+### 2. Generate the test video
+
+The server streams `server/test.264` — a raw H.264 Annex B bitstream. Generate a 10-second test clip using ffmpeg:
+
+```bash
+ffmpeg -f lavfi -i testsrc=duration=10:size=640x480:rate=30 \
+       -c:v libx264 -profile:v baseline -level 3.0 \
+       -x264-params "annexb=1" -an \
+       server/test.264
+```
+
+Flags explained:
+- `-f lavfi -i testsrc=...` — generates a synthetic test card (no input file needed)
+- `-profile:v baseline -level 3.0` — matches the `avc1.42E01E` codec string hardcoded in the browser client; other profiles will fail to decode
+- `-x264-params "annexb=1"` — ensures the output uses Annex B start codes (`00 00 00 01`) rather than AVCC length-prefixed format, which is what the Go parser expects
+- `-an` — strips audio (WebCodecs video-only path)
+
+`test.264` is git-ignored. Re-run this command any time you want a fresh clip, or substitute any other Annex B H.264 baseline file at that path.
+
+### 3. Generate the static server cert (mkcert)
 
 The static server runs over HTTPS so Chrome will serve the page in a secure context. mkcert creates a cert your browser trusts for regular HTTPS.
 
@@ -43,7 +64,7 @@ mkcert -cert-file cert.pem -key-file key.pem localhost 127.0.0.1
 
 This writes `cert.pem` and `key.pem` to the project root. `static-server/main.go` reads them from `../cert.pem` and `../key.pem`.
 
-### 3. Generate the WebTransport cert
+### 4. Generate the WebTransport cert
 
 The QUIC server needs its own short-lived cert. Chrome's WebTransport stack uses a separate certificate verifier (`serverCertificateHashes`) that **does not** use the system trust store — even mkcert certs won't work here. Instead, we pin the cert's SHA-256 fingerprint directly in the client JavaScript.
 
@@ -89,20 +110,22 @@ Serving static files on https://localhost:8443
 
 1. Open Chrome and navigate to **`https://localhost:8443`**
 2. If prompted, accept the certificate warning for the static server (only needed once after a fresh mkcert install)
-3. Click **Connect** — status should change to "Connected!"
-4. Click **Send Message** — you should see `Received: echo: Hello QUIC!`
+3. Click **Connect** — status should change to "Connected!" and the server will immediately begin streaming video
+4. The canvas should start rendering the decoded H.264 frames within a second or two
+5. Click **Send Message** to test the echo stream — you should see `Received: echo: Hello QUIC!` in the log
 
 ## Project structure
 
 ```
 quic-demo/
 ├── server/
-│   └── main.go          # HTTP/3 + WebTransport echo server (UDP :4433)
+│   ├── main.go          # HTTP/3 + WebTransport server (UDP :4433)
+│   └── test.264         # Pre-encoded H.264 Annex B clip (git-ignored)
 ├── static-server/
 │   └── main.go          # HTTPS static file server (:8443)
 ├── static/
-│   ├── index.html       # Demo UI
-│   └── client.js        # WebTransport browser client
+│   ├── index.html       # Demo UI (canvas + echo controls)
+│   └── client.js        # WebTransport client: video decode + echo stream
 ├── gen-cert.sh          # Generates wt-cert.pem and patches client.js hash
 ├── cert.pem / key.pem   # mkcert cert for the static server (git-ignored)
 ├── wt-cert.pem / wt-key.pem  # Short-lived ECDSA cert for QUIC (git-ignored)

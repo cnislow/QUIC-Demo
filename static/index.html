@@ -3,6 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <title>WebTransport Echo Demo</title>
+  <style>
+    body { font-family: sans-serif; padding: 16px; }
+    canvas { display: block; margin-top: 12px; border: 1px solid #ccc; background: #000; }
+    pre { margin-top: 12px; font-size: 12px; }
+  </style>
 </head>
 <body>
   <h1>WebTransport Echo Demo</h1>
@@ -11,6 +16,8 @@
 
   <button id="connectBtn">Connect</button>
   <button id="sendBtn" disabled>Send Message</button>
+
+  <canvas id="videoCanvas" width="640" height="480"></canvas>
 
   <pre id="log"></pre>
 
