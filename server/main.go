@@ -89,6 +89,9 @@ func handleSession(sess *wt.Session) {
 	// Immediately open a server-initiated unidirectional stream and stream video.
 	go streamVideo(sess)
 
+	// Accept browser-initiated unidirectional streams (camera upload).
+	go acceptCameraStreams(sess)
+
 	ctx := context.Background()
 	for {
 		stream, err := sess.AcceptStream(ctx)
@@ -98,6 +101,72 @@ func handleSession(sess *wt.Session) {
 		}
 		go handleStream(stream)
 	}
+}
+
+// acceptCameraStreams loops accepting browser-initiated unidirectional streams
+// and spawns a goroutine to drain each one.
+func acceptCameraStreams(sess *wt.Session) {
+	ctx := context.Background()
+	for {
+		stream, err := sess.AcceptUniStream(ctx)
+		if err != nil {
+			log.Println("AcceptUniStream error:", err)
+			return
+		}
+		log.Println("Camera: browser-initiated unidirectional stream accepted")
+		go receiveCameraStream(stream)
+	}
+}
+
+// receiveCameraStream reads the binary-framed camera data sent by the browser,
+// logs each frame header, and discards the payload.
+//
+// Frame wire format (same as writeFrame / Sub-step A):
+//
+//	[4 B BE] frame_number
+//	[8 B BE] timestamp_microseconds
+//	[1 B   ] frame_type  (0x01 = keyframe, 0x00 = delta)
+//	[4 B BE] payload_length
+//	[N B   ] payload (Annex B H.264 data — discarded)
+func receiveCameraStream(stream *wt.ReceiveStream) {
+	const hdrSize = 17
+	var hdr [hdrSize]byte
+	var totalFrames int
+	var totalBytes int64
+
+	for {
+		if _, err := io.ReadFull(stream, hdr[:]); err != nil {
+			if err != io.EOF && err != io.ErrUnexpectedEOF {
+				log.Println("Camera: header read error:", err)
+			}
+			break
+		}
+
+		frameNum := binary.BigEndian.Uint32(hdr[0:4])
+		timestamp := binary.BigEndian.Uint64(hdr[4:12])
+		frameType := hdr[12]
+		payloadLen := binary.BigEndian.Uint32(hdr[13:17])
+
+		frameTypeName := "delta"
+		if frameType == 0x01 {
+			frameTypeName = "keyframe"
+		}
+		log.Printf("Camera: frame=%d type=%s timestamp=%dµs payload=%dB",
+			frameNum, frameTypeName, timestamp, payloadLen)
+
+		n, err := io.CopyN(io.Discard, stream, int64(payloadLen))
+		totalFrames++
+		totalBytes += hdrSize + n
+
+		if err != nil {
+			if err != io.EOF {
+				log.Println("Camera: payload discard error:", err)
+			}
+			break
+		}
+	}
+
+	log.Printf("Camera: stream closed — %d frames, %d bytes total", totalFrames, totalBytes)
 }
 
 // streamVideo opens a unidirectional send stream and pushes a pre-encoded
