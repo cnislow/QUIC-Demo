@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="UTF-8" />
-  <title>WebTransport Echo Demo</title>
+  <title>QUIC WebTransport Demo</title>
   <style>
     body { font-family: sans-serif; padding: 16px; }
     canvas { display: block; margin-top: 12px; border: 1px solid #ccc; background: #000; }
@@ -10,7 +10,7 @@
   </style>
 </head>
 <body>
-  <h1>WebTransport Echo Demo</h1>
+  <h1>QUIC WebTransport Demo</h1>
 
   <p>Status: <span id="status">Not connected</span></p>
 
@@ -19,10 +19,24 @@
   <button id="startCameraBtn" disabled>Start Camera</button>
   <button id="stopCameraBtn" disabled>Stop Camera</button>
 
-  <canvas id="videoCanvas" width="640" height="480"></canvas>
+  <div style="display:flex; gap:24px; flex-wrap:wrap; margin-top:12px;">
+    <div>
+      <p style="margin:0 0 4px; font-weight:bold;">File Playback</p>
+      <canvas id="videoCanvas" width="640" height="480"></canvas>
+    </div>
+  </div>
 
-  <video id="cameraPreview" width="320" height="240" autoplay muted playsinline
-         style="display:block; margin-top:12px; border:1px solid #ccc; background:#111;"></video>
+  <div style="display:flex; gap:24px; flex-wrap:wrap; margin-top:24px;">
+    <div>
+      <p style="margin:0 0 4px; font-weight:bold;">Camera Capture</p>
+      <video id="cameraPreview" width="640" height="480" autoplay muted playsinline
+             style="display:block; border:1px solid #ccc; background:#111;"></video>
+    </div>
+    <div>
+      <p style="margin:0 0 4px; font-weight:bold;">QUIC Relayed Video</p>
+      <canvas id="relayCanvas" width="640" height="480"></canvas>
+    </div>
+  </div>
 
   <pre id="log"></pre>
 
